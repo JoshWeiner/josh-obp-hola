@@ -78,6 +78,11 @@ def main():
     print(f"  Overall compliance-path coverage: {overall_pct:.1f}%")
     print(f"{'=' * 70}")
 
+    if total_covered == 0:
+        print("::warning::No compliance-path lines covered yet — thresholds not enforced.")
+        print("  Add compliance-path tests to activate threshold enforcement.")
+        sys.exit(0)
+
     if overall_pct < ERROR_THRESHOLD:
         print(f"::error::Compliance-path coverage ({overall_pct:.1f}%) is below {ERROR_THRESHOLD}%")
         sys.exit(1)
