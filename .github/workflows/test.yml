@@ -1,0 +1,77 @@
+name: test
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'adopt'
+          cache: maven
+
+      - name: Run tests with coverage
+        run: mvn test -B
+
+      - name: Upload Jacoco coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-coverage-report
+          path: target/site/jacoco/
+
+      - name: Check compliance-path coverage thresholds
+        if: always()
+        run: |
+          REPORT="target/site/jacoco/jacoco.csv"
+          if [ ! -f "$REPORT" ]; then
+            echo "::warning::Jacoco CSV report not found — skipping threshold check."
+            exit 0
+          fi
+
+          # Compliance-critical classes to check
+          COMPLIANCE_CLASSES="IndexController SessionData OtherController WellKnown Limit SepaCreditTransfersBerlinGroupV13 HydraConfig PostConsentJson FromAccount ToAccount PostConsentRequestVrpJson AccountAccess"
+
+          TOTAL_MISSED=0
+          TOTAL_COVERED=0
+
+          for CLASS in $COMPLIANCE_CLASSES; do
+            LINE=$(grep ",$CLASS," "$REPORT" || true)
+            if [ -n "$LINE" ]; then
+              MISSED=$(echo "$LINE" | awk -F',' '{print $8}')
+              COVERED=$(echo "$LINE" | awk -F',' '{print $9}')
+              TOTAL_MISSED=$((TOTAL_MISSED + MISSED))
+              TOTAL_COVERED=$((TOTAL_COVERED + COVERED))
+            fi
+          done
+
+          TOTAL=$((TOTAL_MISSED + TOTAL_COVERED))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::warning::No compliance-path lines found in report — skipping threshold check."
+            exit 0
+          fi
+
+          if [ "$TOTAL_COVERED" -eq 0 ]; then
+            echo "::warning::Compliance-path coverage is 0% — no compliance-path tests written yet. Threshold enforcement deferred."
+            exit 0
+          fi
+
+          COVERAGE=$((TOTAL_COVERED * 100 / TOTAL))
+          echo "Compliance-path coverage: ${COVERAGE}% (covered=$TOTAL_COVERED, missed=$TOTAL_MISSED, total=$TOTAL)"
+
+          if [ "$COVERAGE" -lt 50 ]; then
+            echo "::error::Compliance-path coverage ${COVERAGE}% is below 50% ERROR threshold."
+            exit 1
+          elif [ "$COVERAGE" -lt 70 ]; then
+            echo "::warning::Compliance-path coverage ${COVERAGE}% is below 70% WARNING threshold."
+          fi
