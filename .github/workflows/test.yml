@@ -1,0 +1,131 @@
+name: test
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v2
+        with:
+          java-version: '11'
+          distribution: 'adopt'
+          cache: maven
+
+      - name: Run tests with coverage
+        run: mvn --batch-mode test
+
+      - name: Upload JaCoCo coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-coverage-report
+          path: target/site/jacoco/
+
+      - name: Check compliance-path coverage
+        if: always()
+        run: |
+          REPORT="target/site/jacoco/jacoco.xml"
+          if [ ! -f "$REPORT" ]; then
+            echo "::warning::JaCoCo report not found — skipping coverage gate."
+            exit 0
+          fi
+
+          # Compliance-critical classes (fully qualified, dot-separated)
+          COMPLIANCE_CLASSES=(
+            "com.openbankproject.hydra.auth.controller.IndexController"
+            "com.openbankproject.hydra.auth.VO.SessionData"
+            "com.openbankproject.hydra.auth.controller.OtherController"
+            "com.openbankproject.hydra.auth.VO.WellKnown"
+            "com.openbankproject.hydra.auth.HydraConfig"
+            "com.openbankproject.model.Limit"
+            "com.openbankproject.model.SepaCreditTransfersBerlinGroupV13"
+            "com.openbankproject.model.PostConsentJson"
+            "com.openbankproject.model.FromAccount"
+            "com.openbankproject.model.ToAccount"
+            "com.openbankproject.model.PostConsentRequestVrpJson"
+            "com.openbankproject.model.AccountAccess"
+          )
+
+          TOTAL_MISSED=0
+          TOTAL_COVERED=0
+          FOUND_ANY=false
+
+          for CLASS in "${COMPLIANCE_CLASSES[@]}"; do
+            # Convert dot notation to path for matching in JaCoCo XML
+            CLASS_PATH="${CLASS//./\/}"
+            # JaCoCo uses package + class name in separate attributes
+            PKG="${CLASS%.*}"
+            PKG_PATH="${PKG//./\/}"
+            CLS="${CLASS##*.}"
+
+            # Extract LINE missed/covered counters for this class
+            MISSED=$(python3 -c "
+          import xml.etree.ElementTree as ET, sys
+          tree = ET.parse('$REPORT')
+          for pkg in tree.findall('.//package'):
+              if pkg.get('name') == '$PKG_PATH':
+                  for cls in pkg.findall('class'):
+                      if cls.get('name') == '$PKG_PATH/$CLS':
+                          for c in cls.findall('counter'):
+                              if c.get('type') == 'LINE':
+                                  print(c.get('missed'))
+                                  sys.exit(0)
+          print('-1')
+          " 2>/dev/null)
+
+            COVERED=$(python3 -c "
+          import xml.etree.ElementTree as ET, sys
+          tree = ET.parse('$REPORT')
+          for pkg in tree.findall('.//package'):
+              if pkg.get('name') == '$PKG_PATH':
+                  for cls in pkg.findall('class'):
+                      if cls.get('name') == '$PKG_PATH/$CLS':
+                          for c in cls.findall('counter'):
+                              if c.get('type') == 'LINE':
+                                  print(c.get('covered'))
+                                  sys.exit(0)
+          print('-1')
+          " 2>/dev/null)
+
+            if [ "$MISSED" != "-1" ] && [ "$COVERED" != "-1" ]; then
+              FOUND_ANY=true
+              TOTAL_MISSED=$((TOTAL_MISSED + MISSED))
+              TOTAL_COVERED=$((TOTAL_COVERED + COVERED))
+              TOTAL=$((MISSED + COVERED))
+              if [ "$TOTAL" -gt 0 ]; then
+                PCT=$((COVERED * 100 / TOTAL))
+                echo "  $CLASS: ${PCT}% (${COVERED}/${TOTAL} lines)"
+              fi
+            fi
+          done
+
+          if [ "$FOUND_ANY" = false ]; then
+            echo "::warning::No compliance-path classes found in JaCoCo report."
+            exit 0
+          fi
+
+          GRAND_TOTAL=$((TOTAL_MISSED + TOTAL_COVERED))
+          if [ "$GRAND_TOTAL" -eq 0 ]; then
+            echo "::warning::No line data for compliance-path classes."
+            exit 0
+          fi
+
+          OVERALL=$((TOTAL_COVERED * 100 / GRAND_TOTAL))
+          echo ""
+          echo "Compliance-path aggregate coverage: ${OVERALL}% (${TOTAL_COVERED}/${GRAND_TOTAL} lines)"
+
+          if [ "$OVERALL" -lt 50 ]; then
+            echo "::error::Compliance-path coverage ${OVERALL}% is below 50% minimum."
+            exit 1
+          elif [ "$OVERALL" -lt 70 ]; then
+            echo "::warning::Compliance-path coverage ${OVERALL}% is below 70% target."
+          fi
