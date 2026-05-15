@@ -1,0 +1,103 @@
+name: test and coverage
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v2
+        with:
+          java-version: '11'
+          distribution: 'adopt'
+          cache: maven
+
+      - name: Run tests with coverage
+        run: mvn --batch-mode test
+
+      - name: Upload Jacoco coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-coverage-report
+          path: target/site/jacoco/
+
+      - name: Check compliance-path coverage
+        if: always()
+        run: |
+          REPORT="target/site/jacoco/jacoco.xml"
+          if [ ! -f "$REPORT" ]; then
+            echo "::warning::Jacoco report not found at $REPORT — skipping coverage check."
+            exit 0
+          fi
+
+          # Compliance-critical classes (from path-detector output)
+          COMPLIANCE_CLASSES=(
+            "IndexController"
+            "SessionData"
+            "OtherController"
+            "WellKnown"
+            "Limit"
+            "SepaCreditTransfersBerlinGroupV13"
+            "HydraConfig"
+            "PostConsentJson"
+            "FromAccount"
+            "ToAccount"
+            "PostConsentRequestVrpJson"
+            "AccountAccess"
+          )
+
+          ERROR_THRESHOLD=50
+          WARN_THRESHOLD=70
+          has_error=false
+          has_warning=false
+
+          echo "=== Compliance-Path Coverage Report ==="
+          for cls in "${COMPLIANCE_CLASSES[@]}"; do
+            # Extract missed and covered lines for each class from Jacoco XML
+            missed=$(grep -oP "name=\"${cls}\"[^/]*/>" "$REPORT" 2>/dev/null | grep -oP 'type="LINE" missed="\K[0-9]+' || echo "")
+            covered=$(grep -oP "name=\"${cls}\"[^/]*/>" "$REPORT" 2>/dev/null | grep -oP 'type="LINE"[^/]*covered="\K[0-9]+' || echo "")
+
+            if [ -z "$missed" ] || [ -z "$covered" ]; then
+              echo "  $cls: no coverage data (not yet tested)"
+              continue
+            fi
+
+            total=$((missed + covered))
+            if [ "$total" -eq 0 ]; then
+              pct=0
+            else
+              pct=$((covered * 100 / total))
+            fi
+
+            if [ "$pct" -lt "$ERROR_THRESHOLD" ]; then
+              echo "  ❌ $cls: ${pct}% (below ${ERROR_THRESHOLD}% error threshold)"
+              has_error=true
+            elif [ "$pct" -lt "$WARN_THRESHOLD" ]; then
+              echo "  ⚠️  $cls: ${pct}% (below ${WARN_THRESHOLD}% warning threshold)"
+              has_warning=true
+            else
+              echo "  ✅ $cls: ${pct}%"
+            fi
+          done
+          echo "========================================"
+
+          if [ "$has_warning" = true ]; then
+            echo "::warning::One or more compliance-path classes are below the ${WARN_THRESHOLD}% warning threshold."
+          fi
+
+          # Do NOT fail the bootstrap PR — thresholds are informational until
+          # compliance-path tests are added by the next playbook.
+          # Once tests exist, uncomment the block below to enforce the error gate:
+          # if [ "$has_error" = true ]; then
+          #   echo "::error::One or more compliance-path classes are below the ${ERROR_THRESHOLD}% error threshold."
+          #   exit 1
+          # fi
